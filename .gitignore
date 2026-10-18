@@ -23,12 +23,8 @@ htmlcov/
 .idea/
 .vscode/
 
-# Local study material and draft submission documents
-docs/LEARNING_GUIDE.md
-docs/CODE_MAP.md
-docs/IMPLEMENTATION_NOTES*
-docs/assets/
-docs/local/
+# Personal study material and historical documents stay local.
+docs/
 
 # Historical audits and scratch output (keep the three reproducible results)
 reports/*

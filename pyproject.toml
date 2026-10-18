@@ -34,7 +34,7 @@ packages = ["sandbox_escape_finder"]
 sandbox_escape_finder = ["py.typed"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "validation"]
+testpaths = ["tests"]
 addopts = "-ra"
 markers = [
     "integration: end-to-end test against the real RestrictedPython package",

@@ -1,6 +1,6 @@
-"""Independent Task 6 acceptance checks, separate from the original suite.
+"""Task 6 acceptance checks alongside the package's other tests.
 
-Run explicitly: python -m pytest -q validation/test_task6_requirements.py
+Run explicitly: python -m pytest -q tests/test_task6_requirements.py
 Checks exercise both the required API and the optional rich reporting API.
 Dynamic checks must run inside the disposable Linux test container.
 """

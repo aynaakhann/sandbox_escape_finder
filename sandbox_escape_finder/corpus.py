@@ -246,7 +246,7 @@ def _builtin_cases() -> list[PayloadCase]:
 def _catalog_cases() -> list[PayloadCase]:
     """Reduced, non-destructive probes mapped to inspected catalog gadgets.
 
-    The mapping and adaptations are documented in docs/CORPUS_SOURCES.md.
+    Source links and adaptations are stored in each case and listed in README.md.
     None of these probes invokes a shell or targets a host path.
     """
     definitions = [

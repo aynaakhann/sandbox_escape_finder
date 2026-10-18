@@ -69,19 +69,32 @@ flowchart TD
     J --> F[Per-payload report and static/dynamic comparison]
 ```
 
-| File | Responsibility |
-|---|---|
-| `analyzer.py`, `detectors.py` | Parse Python ASTs; return technique, location, node type, and confidence. |
-| `corpus.py` | Store attributed probes and load configured custom cases. |
-| `config.py` | Validate detector names, categories, thresholds, limits, and isolation settings. |
-| `prober.py` | Run each case and combine static findings with dynamic observations. |
-| `isolation.py`, `_worker.py` | Start workers, apply limits, and use the JSON request/response protocol. |
-| `runners.py`, `adapters.py` | Construct the RestrictedPython runner and trusted callable hooks. |
-| `oracle.py` | Capture workspace state and judge observable filesystem effects. |
-| `reporting.py`, `cli.py` | Render JSON, results tables, summaries, and the comparison. |
+### Where to change what
 
-All package files are under `sandbox_escape_finder/`. The remaining directories
-are `config/`, `examples/`, `tests/`, `validation/`, `docs/`, and `reports/`.
+Package files below are in `sandbox_escape_finder/`. Search for the named
+function or class to reach the relevant code; names remain useful as lines move.
+
+| Change | File | Starting point |
+|---|---|---|
+| Run settings: enabled rules, seed, threshold, time limits | [config/default.json](config/default.json) | Corresponding JSON key; pass this file with `--config`. |
+| Add or modify an AST detection rule | [detectors.py](sandbox_escape_finder/detectors.py#L178) | Detector class `analyze()`; register new rules in `ALL_DETECTORS`. |
+| Parsing, confidence filtering, finding order | [analyzer.py](sandbox_escape_finder/analyzer.py#L69) | `StaticAnalyzer.analyze()` |
+| Built-in payloads and their source attribution | [corpus.py](sandbox_escape_finder/corpus.py#L73) | `_builtin_cases()`, `_catalog_cases()`; `Corpus.add_custom()` handles extra cases. |
+| Validate settings or change programmatic defaults | [config.py](sandbox_escape_finder/config.py#L91) | `Config` fields, `from_dict()`, `validate()` |
+| Coordinate probes and classify outcomes | [prober.py](sandbox_escape_finder/prober.py#L142) | `DynamicProber.run_report()`, `_classify()`, `_compare()` |
+| Worker timeouts, resource limits, Docker settings | [isolation.py](sandbox_escape_finder/isolation.py#L103) | `_apply_rlimits()`, `SubprocessIsolation`, `DockerIsolation` |
+| Run one request inside its disposable workspace | [_worker.py](sandbox_escape_finder/_worker.py) | `_run()` |
+| RestrictedPython execution policy and supplied guards | [runners.py](sandbox_escape_finder/runners.py#L50) | `RestrictedPythonSandbox._make_globals()`, `__call__()` |
+| Decide whether an observed effect counts as an escape | [oracle.py](sandbox_escape_finder/oracle.py#L76) | `CanaryOracle.setup()`, `evaluate()`, `judge()` |
+| Trusted custom sandbox/oracle functions | [adapters.py](sandbox_escape_finder/adapters.py#L31) | `CallableSandbox`, `CallableOracle` |
+| Report formatting and comparison text | [reporting.py](sandbox_escape_finder/reporting.py) | `to_json()`, `payload_results_table()`, `false_positive_negative_analysis()` |
+| Command-line options and command selection | [cli.py](sandbox_escape_finder/cli.py#L87) | `main()` and the `_cmd_*` handlers |
+| Application or test image construction | [Dockerfile](Dockerfile) | Shared `app` stage, `test` output, default `runtime` output |
+
+The public project has five folders: `sandbox_escape_finder/` contains the
+application, `config/` its settings, `examples/` a usage demonstration, `tests/`
+all automated checks, and `reports/` saved results. This README is the public
+guide for running, testing, and understanding the submission.
 
 ## Public API and installation
 
@@ -140,7 +153,7 @@ not the probability that the code will escape.
 
 Each class has positive and negative unit tests. The corpus contains 12
 catalog-derived probes, five additional checks, and two benign controls.
-The [source and adaptation map](docs/CORPUS_SOURCES.md) records which access
+The [source and adaptation map](#corpus-sources) records which access
 step was retained from each catalog. These are capability probes, not claims
 that every case is a complete working exploit.
 
@@ -211,17 +224,26 @@ test demonstrates the escaped-but-unflagged reporting path independently.
 
 ## Tests
 
-Build the application image first, then the test image:
+The same Dockerfile builds both outputs. Its final `runtime` stage is the
+default application image; selecting `test` adds pytest and the test directory.
+The test image builds directly from the shared application stage, so it does
+not depend on a separately tagged application image.
 
 ```powershell
-docker build -f Dockerfile.test -t sandbox-escape-finder:test .
+docker build --target test -t sandbox-escape-finder:test .
 docker run --rm --network none --read-only --tmpfs /tmp:rw,size=64m,mode=1777 --cap-drop ALL --security-opt no-new-privileges --memory 512m --cpus 1 --pids-limit 64 sandbox-escape-finder:test
 ```
 
 Expected: **100 passed, 8 deselected**. This includes detector tests, oracle
 positive/negative controls, API/configuration checks, the real full-corpus run,
-and ten task acceptance checks. The other eight tests run pytest on the host
-and send their payloads to disposable Docker workers:
+and ten task acceptance checks in `tests/test_task6_requirements.py`.
+To run just those ten, append
+`python -m pytest -q tests/test_task6_requirements.py -p no:cacheprovider`
+to the same `docker run` command, after the image name.
+
+The other eight tests run pytest on the host and send their payloads to
+disposable Docker workers. Build the application image using the command in
+[Run with Docker](#run-with-docker) first, then run:
 
 ```powershell
 python -m venv .venv
@@ -231,7 +253,27 @@ python -m venv .venv
 
 Expected: **8 passed, 100 deselected**; together the two selections cover
 **108 distinct tests**. Skips do not count as exercised tests.
-See [testing details](docs/TASK6_TESTING.md) for individual checks and evidence.
+The eight tests are deselected in the first run and selected in the second;
+they are not eight missing tests. On Windows, use the displayed `-m docker`
+selection; the other dynamic tests need Linux resource limits.
+
+Saved test outputs are [the Linux log](reports/pytest-container.txt) and
+[the Docker-backend log](reports/pytest-docker-backend.txt). To record a new
+run in PowerShell, append
+`2>&1 | Tee-Object -FilePath reports/pytest-container.txt` or the corresponding
+Docker-backend filename, then inspect `$LASTEXITCODE` (expected: `0`).
+
+| Task requirement | Where it is checked |
+|---|---|
+| Named AST techniques with locations and confidence | `tests/test_detectors.py`: positive/negative cases, source positions, and syntax handling. |
+| Required API, thresholds, and callable hooks | `tests/test_api_contract.py` and `tests/test_task6_requirements.py`. |
+| Automated oracle with a deliberately broken fixture | `tests/test_oracle.py` and the contained effect-before-exception controls. |
+| Real unmodified RestrictedPython and isolated full-corpus run | `tests/test_integration.py` and `tests/test_integration_docker.py`. |
+| Attributed corpus, custom inputs, reproducible seed, and comparison | `tests/test_prober.py` and `tests/test_task6_requirements.py`; manually review each source adaptation below. |
+| Installable package and executable example | Docker builds exercise normal/editable installation; the quickstart demonstrates the API. |
+
+The tests check overlapping properties, not 108 different requirements.
+Explaining the code and its limitations remains part of the human review.
 
 ## Configuration and limits
 
@@ -259,13 +301,53 @@ The standard test container needs no Docker socket, and custom hooks require
 trusted code to be present in the worker environment. The reported outcomes
 apply to this pinned dependency version and supplied execution policy.
 
+## Corpus sources
+
+Reviewed on 2026-10-18 against the two catalogs named by Task 6.
+Probes are reduced capability tests, rather than claims of working exploits.
+The reductions keep the relevant Python access step and omit shell execution,
+external targets, and dependencies that are unnecessary to test rejection.
+
+The corpus has **19 cases**: **12 catalog-derived probes**, 5 additional
+technique/control probes, and 2 benign controls. Each source string is unique.
+The metadata in `corpus.py` contains the source URL and adaptation for each case.
+
+| Catalog-derived case | Inspected source | Adaptation |
+|---|---|---|
+| `subclasses_popen` | [pyjailbreaker README example](https://github.com/jailctf/pyjailbreaker#example) | Keep subclass enumeration; use `__bases__[0]` in place of `__base__`; omit shell steps. The historical ID names a capability target, not an executed Popen call. |
+| `func_globals` | [sys.py: sys__wrap_close](https://github.com/jailctf/pyjailbreaker/blob/main/jailbreak/gadgets/python/sys.py) | Isolate function-global access using a local lambda rather than locating a class initializer. |
+| `builtins_subscript` | [Kaplan example.py](https://github.com/moshekaplan/python_sandbox_escapes/blob/master/example.py) | Reduce the `os.__builtins__` recovery example to the mapping lookup, without importing. |
+| `generator_frame` | [builtins_dict.py: builtins_dict__gi_builtins](https://github.com/jailctf/pyjailbreaker/blob/main/jailbreak/gadgets/python/builtins_dict.py) | Reduce generator-frame traversal to reading its globals. |
+| `import_name_call` | [Kaplan example.py](https://github.com/moshekaplan/python_sandbox_escapes/blob/master/example.py) | Keep the direct-import bypass; use local standard-library `os` instead of the example's placeholder module. |
+| `builtin_self` | [builtins_dict.py: builtins_dict__self](https://github.com/jailctf/pyjailbreaker/blob/main/jailbreak/gadgets/python/builtins_dict.py) | Probe `chr.__self__`; it is blocked dynamically and currently unflagged statically. |
+| `wrap_close_builtins` | [builtins_dict.py: builtins_dict__wrap_close](https://github.com/jailctf/pyjailbreaker/blob/main/jailbreak/gadgets/python/builtins_dict.py) | Inline the class-list dependency and stop at the recovered builtins mapping. |
+| `sys_modules_builtins` | [Kaplan example.py](https://github.com/moshekaplan/python_sandbox_escapes/blob/master/example.py) | Update Python 2 `__builtin__` to Python 3 `builtins`; target the local `sys` module. |
+| `os_builtins_import` | [Kaplan example.py](https://github.com/moshekaplan/python_sandbox_escapes/blob/master/example.py) | Retain the module-builtins import chain; use the local `sys` module. |
+| `builtin_importer` | [import_builtin_module.py: import_builtin_module__builtinimporter](https://github.com/jailctf/pyjailbreaker/blob/main/jailbreak/gadgets/python/import_builtin_module.py) | Inline subclass enumeration and request the local `sys` module; no command execution. |
+| `object_dict` | [get_obj_dict.py: get_obj_dict__basic](https://github.com/jailctf/pyjailbreaker/blob/main/jailbreak/gadgets/python/get_obj_dict.py) | Apply the object-dictionary access step to a local function; currently unflagged statically. |
+| `generator_back_builtins` | [builtins_dict.py: builtins_dict__gi_builtins](https://github.com/jailctf/pyjailbreaker/blob/main/jailbreak/gadgets/python/builtins_dict.py) | Retain caller-frame traversal and builtins access; assign the recovered value instead of returning it from a gadget. |
+
+`closure_cell`, `frame_getframe`, `format_string`, `getattr_dunder`, and
+`plain_import_os` are additional checks written for this package. Their metadata
+does not claim derivation from a catalog. The two benign cases check arithmetic
+and a string merely mentioning dunder names.
+
+The corpus spans several access steps within related chains. Twelve probes do
+not mean twelve distinct vulnerability classes. The detector suite separately
+tests seven named technique classes with positive and negative examples.
+
+The two unflagged catalog access steps are documented static coverage limits;
+they do not escape RestrictedPython in the tested configuration. The dynamic
+report preserves that distinction rather than changing expectations to claim
+the static analyzer detects every possible technique.
+
 ## References and license
 
 - [Task specification](https://github.com/SeekingDream/ProgrammingTask/blob/master/06_sandbox_escape_finder.md)
 - [RestrictedPython documentation](https://restrictedpython.readthedocs.io/)
 - [pyjailbreaker catalog](https://github.com/jailctf/pyjailbreaker)
 - [Python sandbox escapes catalog](https://github.com/moshekaplan/python_sandbox_escapes)
-- [Per-payload attribution](docs/CORPUS_SOURCES.md)
+- [Per-payload attribution](#corpus-sources)
 
 The project uses the [MIT license](LICENSE). External catalogs and dependencies
 retain their own licenses and attribution.
