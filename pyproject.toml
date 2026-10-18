@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools==80.9.0", "wheel==0.45.1"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sandbox_escape_finder"
+version = "0.1.0"
+description = "Static + dynamic finder for Python sandbox-escape techniques, with a RestrictedPython dynamic prober."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "SandboxEscapeFinder (university Task 6)" }]
+keywords = ["security", "sandbox", "RestrictedPython", "ast", "static-analysis"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Intended Audience :: Developers",
+]
+dependencies = [
+    # The real, unmodified target of the dynamic prober.
+    "RestrictedPython==8.5",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.1.1"]
+
+[project.scripts]
+sandbox-escape-finder = "sandbox_escape_finder.cli:main"
+
+[tool.setuptools]
+packages = ["sandbox_escape_finder"]
+
+[tool.setuptools.package-data]
+sandbox_escape_finder = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "validation"]
+addopts = "-ra"
+markers = [
+    "integration: end-to-end test against the real RestrictedPython package",
+    "docker: end-to-end test using the Docker container-isolation backend",
+]

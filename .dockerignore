@@ -1,0 +1,22 @@
+# Only the files needed to build and test the public project enter the context.
+**
+!pyproject.toml
+!README.md
+!LICENSE
+!requirements-test-lock.txt
+!Dockerfile
+!Dockerfile.test
+!sandbox_escape_finder/
+!sandbox_escape_finder/*.py
+!sandbox_escape_finder/py.typed
+!config/
+!config/*.json
+!examples/
+!examples/*.py
+!tests/
+!tests/*.py
+!validation/
+!validation/*.py
+!docs/
+!docs/CORPUS_SOURCES.md
+!docs/TASK6_TESTING.md

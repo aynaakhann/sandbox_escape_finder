@@ -1,0 +1,53 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python build / cache artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Test / tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Local study material and draft submission documents
+docs/LEARNING_GUIDE.md
+docs/CODE_MAP.md
+docs/IMPLEMENTATION_NOTES*
+docs/assets/
+docs/local/
+
+# Historical audits and scratch output (keep the three reproducible results)
+reports/*
+!reports/probe.json
+!reports/pytest-container.txt
+!reports/pytest-docker-backend.txt
+
+# Local release preparation and archives
+github-ready/
+tools/prepare_github.py
+GITHUB_UPLOAD.md
+*.zip
+
+# Local credentials and machine settings
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.aws/
+.codex/
+.agents/

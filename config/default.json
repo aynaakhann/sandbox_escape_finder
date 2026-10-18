@@ -1,0 +1,43 @@
+{
+  "_comment": "Default configuration for SandboxEscapeFinder. Every key is documented in README.md (Configuration reference). Unknown keys and unsafe combinations are rejected by sandbox_escape_finder.config.Config.",
+
+  "enabled_detectors": [
+    "subclasses_traversal",
+    "globals_access",
+    "closure_cell",
+    "builtins_recovery",
+    "frame_introspection",
+    "format_string_traversal",
+    "dangerous_builtin_call"
+  ],
+
+  "enabled_categories": null,
+
+  "custom_payloads": [],
+
+  "seed": 1337,
+  "min_confidence": 0.0,
+
+  "timeout_seconds": 10.0,
+
+  "resource_limits": {
+    "cpu_seconds": 5,
+    "address_space_mb": 512,
+    "file_size_mb": 8,
+    "open_files": 64,
+    "processes": 64
+  },
+
+  "isolation": {
+    "mode": "subprocess",
+    "require_isolation": true,
+    "allow_in_process": false,
+    "allow_network": false
+  },
+
+  "reporting": {
+    "include_snippets": true,
+    "json_indent": 2,
+    "max_table_rows": 100
+  }
+}
