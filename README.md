@@ -292,18 +292,18 @@ The following table is generated from that report:
 | Payload | Technique | Static flag | Dynamic outcome | Escape confirmed |
 |---|---|:---:|---|:---:|
 | `wrap_close_builtins` | Class initializer globals to builtins | yes | `compile_rejected` | no |
-| `func_globals` | Function __globals__ access | yes | `compile_rejected` | no |
+| `func_globals` | Function `__globals__` access | yes | `compile_rejected` | no |
 | `closure_cell` | Closure / cell introspection | yes | `compile_rejected` | no |
 | `plain_import_os` | Plain import statement | no | `execution_blocked` | no |
-| `import_name_call` | Direct __import__ call | yes | `compile_rejected` | no |
+| `import_name_call` | Direct `__import__` call | yes | `compile_rejected` | no |
 | `getattr_dunder` | Dunder getattr | yes | `execution_blocked` | no |
-| `subclasses_popen` | __subclasses__ / MRO traversal | yes | `compile_rejected` | no |
+| `subclasses_popen` | `__subclasses__` / MRO traversal | yes | `compile_rejected` | no |
 | `generator_back_builtins` | Generator caller-frame builtins recovery | yes | `compile_rejected` | no |
-| `builtins_subscript` | __builtins__ / built-ins recovery | yes | `compile_rejected` | no |
+| `builtins_subscript` | `__builtins__` / built-ins recovery | yes | `compile_rejected` | no |
 | `sys_modules_builtins` | sys.modules builtins import recovery | yes | `compile_rejected` | no |
 | `frame_getframe` | Frame / execution-context introspection | yes | `compile_rejected` | no |
 | `builtin_importer` | BuiltinImporter class discovery | yes | `compile_rejected` | no |
-| `builtin_self` | Builtin function __self__ recovery | no | `compile_rejected` | no |
+| `builtin_self` | Builtin function `__self__` recovery | no | `compile_rejected` | no |
 | `os_builtins_import` | Module builtins mapping import recovery | yes | `compile_rejected` | no |
 | `format_string` | Format-string attribute traversal | yes | `execution_blocked` | no |
 | `benign_arithmetic` | Benign arithmetic (control) | no | `execution_completed` | no |
@@ -371,9 +371,9 @@ Docker-backend filename, then inspect `$LASTEXITCODE` (expected: `0`).
 | Attributed corpus, custom inputs, reproducible seed, and comparison | `tests/test_prober.py` and `tests/test_task6_requirements.py`; manually review each source adaptation below. |
 | Installable package and executable example | Docker builds exercise normal/editable installation; the quickstart demonstrates the API. |
 
-The tests check overlapping properties, not 109 different requirements or
-109 payloads. The 19 corpus payloads are the actual snippets scanned and run
-against RestrictedPython. Pytest items are checks around those payloads and
+The tests check overlapping properties, not one requirement per test, and not
+one payload per test. The 19 corpus payloads are the actual snippets scanned
+and run against RestrictedPython. Pytest items are checks around those payloads and
 the rest of the tool. For example, `tests/test_detectors.py` uses small,
 project-authored positive and negative snippets to check each detector's
 matching behavior, locations, and false alarms. These fixtures are not copied
