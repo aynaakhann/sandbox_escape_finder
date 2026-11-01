@@ -33,8 +33,8 @@ command applies the additional containment settings shown above.
 
 On the maintainer's tested setup (Docker Desktop 29.8.2 using Linux containers,
 CPython 3.13, and RestrictedPython 8.5), both Docker images built successfully.
-The core suite completed with 101 passed and 8 deselected; the host-orchestrated
-Docker suite completed with 8 passed and 101 deselected. The application image
+The core suite completed with 110 passed and 9 deselected; the host-orchestrated
+Docker suite completed with 9 passed and 110 deselected. The application image
 and quickstart also ran successfully. This records results for that setup; it is
 not a guarantee that the project will run unchanged on every Docker installation.
 Other systems need a working Docker Engine that supports Linux containers,
@@ -228,9 +228,12 @@ state and confirms an effect if an
 created/removed. No real host file is used as an escape target.
 
 The tested RestrictedPython runner grants no filesystem access, so these effects
-violate its intended policy. Tests use a deliberately broken toy runner to
-establish that the oracle can detect a marker effect. This positive control
-also checks that a later exception does not erase an already observed effect.
+violate its intended policy. Oracle tests also use `ToyBrokenSandbox`, an
+intentionally insecure test fixture that permits a controlled payload to write
+the escape marker in the temporary workspace. This positive control verifies
+that the oracle detects an observed effect, including when the payload raises
+an exception afterward. `ToyBrokenSandbox` is for controlled tests only; it is
+not the RestrictedPython runner used for the project's corpus probes.
 
 In subprocess mode, the controller snapshots the temporary workspace directly.
 That subprocess workspace does not constrain the payload to that directory; a
@@ -249,9 +252,28 @@ writes would need an allowed-area policy. "No confirmed escape" means no
 observed effect under this setup; it is not proof that arbitrary Python code is
 safe.
 
+## Trust model and limitations
+
+The worker returns execution facts as JSON; that result is not authenticated.
+`compiled`, `compile_error`, execution flags, error details, and payload stdout
+depend on the worker's report. With the built-in CanaryOracle, escape verdicts
+and observed file changes come from controller snapshots; a custom Oracle can
+also use the worker result.
+The Oracle compares final states, so a file effect undone before observation is
+not seen. A Docker boundary escape was not tested. Snapshots have no explicit
+file-count or total-size limit in the scanner, and regular files are read in
+full; Docker mode separately caps the workspace with a configured tmpfs size.
+Subprocess timeout cleanup kills the worker's session, but does not handle a
+descendant that leaves that session. On a Docker timeout, the controller kills
+the worker and refuses to snapshot unless Docker confirms it stopped; failure
+to confirm is reported as an infrastructure failure. An unreadable directory
+is recorded as unknown in the snapshot and counts as an observed effect if its
+before and after states differ. The Oracle does not monitor host paths or other
+effects outside its designated workspace.
+
 ## Results
 
-Verified on **2026-11-01** with RestrictedPython **8.5** in Linux containers.
+Verified on **2026-11-02** with RestrictedPython **8.5** in Linux containers.
 The saved [JSON report](reports/probe.json) contains the underlying observations.
 
 | Measure | Result |
@@ -308,15 +330,18 @@ docker build --target test -t sandbox-escape-finder:test .
 docker run --rm --network none --read-only --tmpfs /tmp:rw,size=64m,mode=1777 --cap-drop ALL --security-opt no-new-privileges --memory 512m --cpus 1 --pids-limit 64 sandbox-escape-finder:test
 ```
 
-Expected: **101 passed, 8 deselected**. This includes detector tests, oracle
+Expected: **110 passed, 9 deselected**. This includes detector tests, oracle
 positive/negative controls, API/configuration checks, the real full-corpus run,
-and ten task acceptance checks in `tests/test_task6_requirements.py`.
-To run just those ten, append
+and thirteen task acceptance checks in `tests/test_task6_requirements.py`.
+To run just those thirteen, append
 `python -m pytest -q tests/test_task6_requirements.py -p no:cacheprovider`
 to the same `docker run` command, after the image name.
 
-The other eight tests run pytest on the host and send their payloads to
-disposable Docker workers. Build the application image using the command in
+The nine Docker-marked tests run pytest on the host. Eight run payloads in
+disposable Docker workers; one checks timeout kill/inspection ordering with a
+mock Docker command runner. The core suite also includes an unmarked mock-only
+test that checks the controller refuses the snapshot when stop confirmation
+fails. Build the application image using the command in
 [Run with Docker](#run-with-docker) first, then run:
 
 ```powershell
@@ -325,10 +350,10 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pytest -q -m docker -p no:cacheprovider
 ```
 
-Expected: **8 passed, 101 deselected**; together the two selections cover
-**109 distinct pytest items**. Skips do not count as exercised tests.
-The eight tests are deselected in the first run and selected in the second;
-they are not eight missing tests. On Windows, use the displayed `-m docker`
+Expected: **9 passed, 110 deselected**; together the two selections cover
+**119 distinct pytest items**. Skips do not count as exercised tests.
+The nine tests are deselected in the first run and selected in the second;
+they are not nine missing tests. On Windows, use the displayed `-m docker`
 selection; the other dynamic tests need Linux resource limits.
 
 Saved test outputs are [the Linux log](reports/pytest-container.txt) and
