@@ -94,16 +94,21 @@ execution status, oracle verdict, provenance, and timing.
 
 ```mermaid
 flowchart TD
-    C[Validated configuration and attributed corpus] --> P[DynamicProber]
-    P --> A[AST analysis: seven detectors]
+    C[Validated configuration and attributed corpus] --> A[StaticAnalyzer: AST analysis, seven detectors]
+    C --> P[DynamicProber: dynamic execution only]
     P --> B[Trusted controller: Oracle before snapshot]
     B --> W[Isolated worker: sandbox only]
     W --> R[RestrictedPython: compile and execute]
     R --> O[Trusted controller: after snapshot and verdict]
-    A --> J[Join findings and execution facts]
+    A --> J[Join by payload ID and compare]
     O --> J
-    J --> F[Per-payload report and static/dynamic comparison]
+    J --> F[Combined per-payload report]
 ```
+
+`AnalysisPipeline` sends the same normalized corpus through two separate
+corpus-wide passes: static analysis first, then dynamic probing. The dynamic
+branch does not call the static analyzer. After both passes finish, the
+pipeline joins their results by payload ID and creates the comparison report.
 
 ### Where to change what
 
@@ -117,7 +122,8 @@ function or class to reach the relevant code; names remain useful as lines move.
 | Parsing, confidence filtering, finding order | [analyzer.py](sandbox_escape_finder/analyzer.py#L69) | `StaticAnalyzer.analyze()` |
 | Built-in payloads and their source attribution | [corpus.py](sandbox_escape_finder/corpus.py#L73) | `_builtin_cases()`, `_catalog_cases()`; `Corpus.add_custom()` handles extra cases. |
 | Validate settings or change programmatic defaults | [config.py](sandbox_escape_finder/config.py#L91) | `Config` fields, `from_dict()`, `validate()` |
-| Coordinate probes and classify outcomes | [prober.py](sandbox_escape_finder/prober.py#L142) | `DynamicProber.run_report()`, `_classify()`, `_compare()` |
+| Execute isolated payloads and classify dynamic outcomes | [prober.py](sandbox_escape_finder/prober.py#L142) | `DynamicProber._run_dynamic_branch()`, `_classify()` |
+| Run separate static and dynamic corpus passes, then join them | [pipeline.py](sandbox_escape_finder/pipeline.py) | `AnalysisPipeline.run_report()` |
 | Worker timeouts, resource limits, Docker settings | [isolation.py](sandbox_escape_finder/isolation.py#L103) | `_apply_rlimits()`, `SubprocessIsolation`, `DockerIsolation` |
 | Run one request inside its disposable workspace | [_worker.py](sandbox_escape_finder/_worker.py) | `_run()` |
 | RestrictedPython execution policy and supplied guards | [runners.py](sandbox_escape_finder/runners.py#L50) | `RestrictedPythonSandbox._make_globals()`, `__call__()` |
@@ -145,22 +151,24 @@ the subprocess backend requires POSIX resource limits.
 
 ```python
 from sandbox_escape_finder import (
-    CanaryOracle, DynamicProber, RestrictedPythonSandbox, StaticAnalyzer,
+    AnalysisPipeline, CanaryOracle, DynamicProber, RestrictedPythonSandbox, StaticAnalyzer,
     load_corpus,
 )
 
 config = {"seed": 1337, "isolation": {"mode": "docker"}}
 # Build sandbox-escape-finder:latest first; Docker must be running.
-findings = StaticAnalyzer(config).scan("x = (lambda: 0).__globals__")
+analyzer = StaticAnalyzer(config)
 prober = DynamicProber(RestrictedPythonSandbox(), CanaryOracle(), config)
-report = prober.run(load_corpus(config))
-assert isinstance(findings, list) and isinstance(report, list)
+report = AnalysisPipeline(analyzer, prober).run(load_corpus(config))
+assert isinstance(report, list)
 ```
 
-`scan()` returns `list[dict]` findings. `run()` accepts an iterable of source
-strings or attributed corpus cases and returns `list[dict]` results. Each
-result records static flags, execution status, oracle confirmation, and timing.
-`analyze()` and `run_report()` provide richer objects for reporting helpers.
+`StaticAnalyzer.scan()` returns `list[dict]` findings. `AnalysisPipeline.run()`
+accepts an iterable of source strings or attributed corpus cases and returns
+`list[dict]` joined results. `AnalysisPipeline.run_report()` provides aggregate
+metadata for reporting helpers. `DynamicProber` remains available as the
+dynamic-only branch; its legacy `run()` and `run_report()` methods delegate to
+the pipeline so existing callers continue to receive the combined report.
 
 The Docker backend starts a fresh container for each case. The application
 image explicitly uses subprocess workers inside its outer container, so it does

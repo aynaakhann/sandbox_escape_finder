@@ -10,9 +10,13 @@ Static analysis::
 
 Dynamic probing::
 
-    from sandbox_escape_finder import DynamicProber, RestrictedPythonSandbox, CanaryOracle, load_corpus
+    from sandbox_escape_finder import (
+        AnalysisPipeline, DynamicProber, RestrictedPythonSandbox,
+        CanaryOracle, StaticAnalyzer, load_corpus,
+    )
+    analyzer = StaticAnalyzer(config)
     prober = DynamicProber(RestrictedPythonSandbox(), CanaryOracle(), config)
-    report = prober.run(load_corpus(config))
+    report = AnalysisPipeline(analyzer, prober).run_report(load_corpus(config))
 
 This package statically flags *suspicious syntax* and dynamically probes a
 documented, unmodified RestrictedPython setup. RestrictedPython is not, by its
@@ -35,6 +39,7 @@ from .detectors import (
     detector_catalog,
 )
 from .oracle import CanaryOracle, OracleVerdict
+from .pipeline import AnalysisPipeline
 from .prober import DynamicProber, PayloadReport, ProbeReport
 from .reporting import (
     comparison_matrix,
@@ -73,6 +78,7 @@ __all__ = [
     "load_corpus",
     # Dynamic
     "DynamicProber",
+    "AnalysisPipeline",
     "ProbeReport",
     "PayloadReport",
     "RestrictedPythonSandbox",

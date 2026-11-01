@@ -19,6 +19,7 @@ from .config import Config, ConfigError
 from .corpus import load_corpus
 from .detectors import detector_catalog
 from .oracle import CanaryOracle
+from .pipeline import AnalysisPipeline
 from .prober import DynamicProber
 from .reporting import (
     comparison_matrix_text,
@@ -62,8 +63,9 @@ def _cmd_scan(args) -> int:
 def _cmd_probe(args) -> int:
     config = _load_config(args.config)
     corpus = load_corpus(config)
+    analyzer = StaticAnalyzer(config)
     prober = DynamicProber(RestrictedPythonSandbox(), CanaryOracle(), config)
-    report = prober.run_report(corpus)
+    report = AnalysisPipeline(analyzer, prober).run_report(corpus)
     if args.json:
         print(to_json(report))
         return 0
@@ -94,7 +96,9 @@ def main(argv=None) -> int:
     p_scan.add_argument("--json", action="store_true")
     p_scan.set_defaults(func=_cmd_scan)
 
-    p_probe = sub.add_parser("probe", help="run the dynamic prober over the corpus")
+    p_probe = sub.add_parser(
+        "probe", help="run separate static and dynamic passes over the corpus"
+    )
     p_probe.add_argument("--json", action="store_true")
     p_probe.set_defaults(func=_cmd_probe)
 

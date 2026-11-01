@@ -6,13 +6,10 @@ Usage (as required by the assignment)::
     prober = DynamicProber(sandbox_exec, oracle, config)
     report = prober.run(payload_corpus)
 
-For each payload the prober:
-
-1. runs the static analyzer,
-2. runs the payload through the configured **isolation backend** (which rebuilds
-   the sandbox + oracle inside an isolated worker),
-3. classifies the dynamic outcome into an explicit taxonomy,
-4. compares the static and dynamic results.
+The dynamic prober runs each payload through the configured **isolation
+backend**, which rebuilds the sandbox in an isolated worker. It classifies the
+outcome into an explicit taxonomy. Static analysis and the final static/dynamic
+comparison are handled by :mod:`pipeline` as separate corpus-wide phases.
 
 Crucially: a successful Python execution, an exception, or a timeout is **never**
 treated as a confirmed escape. Only the oracle confirms an escape. An
@@ -27,9 +24,8 @@ import inspect
 from dataclasses import asdict, dataclass, field
 from typing import Any, Optional
 
-from .analyzer import StaticAnalyzer
 from .config import Config
-from .corpus import Corpus, PayloadCase
+from .corpus import PayloadCase
 from .isolation import (
     ISO_INFRA,
     ISO_OK,
@@ -144,7 +140,6 @@ class DynamicProber:
         self.sandbox = sandbox_exec
         self.oracle = oracle
         self.config = Config.coerce(config)
-        self.analyzer = StaticAnalyzer(self.config)
         self.backend = make_backend(self.config)
 
     # ------------------------------------------------------------------ #
@@ -156,106 +151,29 @@ class DynamicProber:
         return [row.to_dict() for row in self.run_report(payload_corpus).payloads]
 
     def run_report(self, payload_corpus: Any) -> ProbeReport:
-        """Run the same probes and retain aggregate metadata in a rich report."""
-        cases = self._iter_cases(payload_corpus)
+        """Run both independent analysis branches and return their joined report.
+
+        This is a compatibility entry point. The pipeline runs the static pass
+        over the corpus, runs the dynamic pass separately, and joins by payload
+        ID at the end. Use :class:`AnalysisPipeline` directly when composing the
+        two branches explicitly.
+        """
+        from .pipeline import AnalysisPipeline
+
+        return AnalysisPipeline.for_prober(self).run_report(payload_corpus)
+
+    def _run_dynamic_branch(self, cases: list[PayloadCase]):
+        """Run only the dynamic branch for all cases; no static analysis here."""
         in_process = isinstance(self.backend, InProcessExecutor)
         if in_process:
             available, reason = True, "in-process (controlled)"
         else:
             available, reason = self.backend.available()
-
-        reports = [self._run_case(case, available, reason, in_process) for case in cases]
-        report = ProbeReport(
-            backend=self.backend.name,
-            isolation_available=available,
-            isolation_reason=reason,
-            config=self.config.to_dict(),
-            payloads=reports,
-        )
-        report.summary = self._summarize(reports)
-        return report
-
-    def _iter_cases(self, payload_corpus: Any) -> list[PayloadCase]:
-        if isinstance(payload_corpus, (str, bytes)):
-            raise TypeError("payload_corpus must be an iterable of source strings, not one string")
-        if hasattr(payload_corpus, "ordered"):
-            return payload_corpus.ordered(self.config.seed)
-        cases = []
-        for index, item in enumerate(payload_corpus):
-            if isinstance(item, str):
-                item = PayloadCase(
-                    id=f"source_{index:04d}", category="custom", technique="User source",
-                    description="Source string supplied to DynamicProber.run",
-                    source=item, reference="user-supplied", provenance="user-supplied source",
-                    expected_static=None,
-                )
-            if not isinstance(item, PayloadCase):
-                raise TypeError("Each payload must be a source string or PayloadCase")
-            cases.append(item)
-        return Corpus(cases).ordered(self.config.seed)
-
-    # ------------------------------------------------------------------ #
-    def _run_case(
-        self, case: PayloadCase, available: bool, reason: str, in_process: bool
-    ) -> PayloadReport:
-        # 1. Static analysis.
-        scan = self.analyzer.analyze(case.source)
-        static_flagged = bool(scan.findings)
-        detectors_fired = sorted({f.detector for f in scan.findings})
-        static_matches = case.expected_static is None or static_flagged == case.expected_static
-
-        # 2. Dynamic analysis via the selected backend.
-        iso = self._execute(case, available, in_process)
-
-        # 3. Classify.
-        exec_status, oracle_result, escape = self._classify(iso)
-        comparison = self._compare(static_flagged, exec_status, escape)
-
-        outcome = iso.outcome or {}
-        verdict = iso.verdict or {}
-
-        notes = ""
-        if not static_matches:
-            notes = (
-                f"Static result ({'flag' if static_flagged else 'no flag'}) differs from "
-                f"documented expectation ({'flag' if case.expected_static else 'no flag'})."
-            )
-
-        return PayloadReport(
-            payload_id=case.id,
-            technique=case.technique,
-            category=case.category,
-            reference=case.reference,
-            provenance=case.provenance,
-            static_flagged=static_flagged,
-            detectors_fired=detectors_fired,
-            static_findings=[f.to_dict() for f in scan.findings],
-            static_syntax_ok=scan.syntax_ok,
-            static_error=scan.error,
-            expected_static=case.expected_static,
-            static_matches_expectation=static_matches,
-            isolation_backend=iso.backend,
-            isolation_available=available,
-            execution_status=exec_status,
-            compiled=outcome.get("compiled"),
-            compile_error=outcome.get("compile_error"),
-            execution_attempted=outcome.get("execution_attempted"),
-            execution_completed=outcome.get("execution_completed"),
-            error_type=outcome.get("error_type"),
-            error_message=outcome.get("error_message"),
-            duration_seconds=round(iso.duration, 4),
-            timed_out=iso.timed_out,
-            infra_error=iso.infra_error,
-            payload_stdout=outcome.get("stdout", ""),
-            oracle_result=oracle_result,
-            oracle_reason=verdict.get("reason"),
-            oracle_observations=verdict.get("observations", {}),
-            oracle_scope_note=verdict.get("scope_note"),
-            escape_confirmed=escape,
-            comparison=comparison,
-            expected_restricted=case.expected_restricted,
-            notes=notes,
-        )
+        results = {
+            case.id: self._execute(case, available, in_process)
+            for case in cases
+        }
+        return available, reason, results
 
     def _execute(self, case: PayloadCase, available: bool, in_process: bool) -> IsolationResult:
         if in_process:
@@ -347,38 +265,14 @@ class DynamicProber:
 
     @staticmethod
     def _compare(static_flagged: bool, exec_status: str, escape: bool) -> str:
-        if escape:
-            return CMP_POS_ESCAPE if static_flagged else CMP_NEG_ESCAPE
-        if exec_status in (TIMEOUT, RESOURCE_EXCEEDED, INCONCLUSIVE, BLOCKED):
-            return CMP_INCONCLUSIVE
-        if static_flagged and escape:
-            return CMP_POS_ESCAPE
-        if static_flagged and not escape:
-            return CMP_POS_NO_ESCAPE
-        if not static_flagged and escape:
-            return CMP_NEG_ESCAPE
-        return CMP_NEG_NO_ESCAPE
+        """Compatibility wrapper; final comparison lives in the pipeline."""
+        from .pipeline import compare
+
+        return compare(static_flagged, exec_status, escape)
 
     @staticmethod
     def _summarize(reports: list[PayloadReport]) -> dict:
-        by_exec: dict[str, int] = {}
-        by_cmp: dict[str, int] = {}
-        for r in reports:
-            by_exec[r.execution_status] = by_exec.get(r.execution_status, 0) + 1
-            by_cmp[r.comparison] = by_cmp.get(r.comparison, 0) + 1
-        inconclusive = sum(
-            1
-            for r in reports
-            if r.execution_status in (TIMEOUT, RESOURCE_EXCEEDED, INCONCLUSIVE, BLOCKED)
-        )
-        return {
-            "total_payloads": len(reports),
-            "static_flagged": sum(1 for r in reports if r.static_flagged),
-            "escapes_confirmed": sum(1 for r in reports if r.escape_confirmed),
-            "inconclusive": inconclusive,
-            "static_expectation_mismatches": sum(
-                1 for r in reports if not r.static_matches_expectation
-            ),
-            "by_execution_status": by_exec,
-            "by_comparison": by_cmp,
-        }
+        """Compatibility wrapper; aggregation lives in the final pipeline."""
+        from .pipeline import summarize
+
+        return summarize(reports)

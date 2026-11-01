@@ -5,9 +5,9 @@ Demonstrates the full flow with SAFE defaults:
 1. Initialise the static analyzer and scan a short Python sample.
 2. Load the attributed corpus.
 3. Set up the REAL RestrictedPython integration (RestrictedPythonSandbox).
-4. Run the dynamic prober through the configured isolation mechanism.
-5. Print static findings and dynamic reports.
-6. Produce the static-vs-dynamic comparison.
+4. Run a complete static pass over the corpus.
+5. Run a separate dynamic pass through the configured isolation mechanism.
+6. Join results by payload ID and produce the comparison report.
 
 The example never silently falls back to an insecure execution path. If the
 configured isolation prerequisite is unavailable, it prints a clear diagnostic
@@ -26,6 +26,7 @@ from sandbox_escape_finder import (
     CanaryOracle,
     Config,
     DynamicProber,
+    AnalysisPipeline,
     RestrictedPythonSandbox,
     StaticAnalyzer,
     comparison_matrix_text,
@@ -94,11 +95,13 @@ def main() -> int:
             "  then set isolation.mode = 'docker' in your config."
         )
 
-    report = prober.run_report(corpus)
+    # The pipeline completes the static corpus pass and dynamic corpus pass
+    # independently, then joins their results by payload ID.
+    report = AnalysisPipeline(analyzer, prober).run_report(corpus)
 
     # ----- 5b & 6: dynamic report + comparison -----
     print("\n" + "=" * 70)
-    print("DYNAMIC PROBE REPORT")
+    print("COMBINED STATIC + DYNAMIC REPORT")
     print("=" * 70)
     print(summarize_text(report))
     print()
