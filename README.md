@@ -94,18 +94,16 @@ execution status, oracle verdict, provenance, and timing.
 
 ```mermaid
 flowchart TD
-    C[Input: config and attributed corpus] --> N[AnalysisPipeline: validate cases and shuffle order using configured seed]
-    N --> A[Static branch: StaticAnalyzer parses AST and runs seven detectors]
-    N --> P[Dynamic branch: DynamicProber dispatches payloads]
-    P --> V{Is configured isolation backend available?}
+    C[Attributed payload corpus] --> A[StaticAnalyzer: AST scan with seven detectors]
+    C --> D[DynamicProber: check configured backend]
+    D --> V{Backend available?}
     V -->|yes| B[Backend prepares temporary workspace and Oracle before-state]
-    V -->|no| X[Record BLOCKED; do not fall back]
-    B --> W[Launch isolated worker: subprocess or per-payload container]
-    W --> S[Worker loads trusted sandbox runner; Oracle stays in controller]
-    S --> R[RestrictedPythonSandbox calls compile_restricted, then guarded exec]
-    R --> Q[Worker returns structured compile and execution facts]
-    Q --> O[Trusted controller captures after-state and evaluates Oracle]
-    O --> CL[Backend removes temporary workspace and container resources]
+    V -->|no| X[Mark dynamic result BLOCKED]
+    B --> W[Backend launches isolated worker]
+    W --> R[Worker runs RestrictedPython runner: compile and execute payload]
+    R --> Q[Worker returns execution facts]
+    Q --> O[Controller captures after-state and evaluates Oracle]
+    O --> CL[Backend cleans temporary workspace and worker resources]
     A --> J[AnalysisPipeline joins static and dynamic results by payload ID]
     CL --> J
     X --> J
