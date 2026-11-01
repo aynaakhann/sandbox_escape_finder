@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import base64
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -232,19 +233,33 @@ class SubprocessIsolation(IsolationBackend):
         timed_out = False
         stdout, stderr, returncode = "", "", None
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 [sys.executable, "-I", "-m", "sandbox_escape_finder._worker"],
-                input=json.dumps(request),
-                capture_output=True,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=self.config.timeout_seconds,
                 cwd=str(workspace),
                 env=env,
                 preexec_fn=preexec,
+                start_new_session=True,
             )
+            try:
+                stdout, stderr = proc.communicate(
+                    input=json.dumps(request), timeout=self.config.timeout_seconds
+                )
+            except subprocess.TimeoutExpired:
+                # Kill the worker's whole session before observing the workspace;
+                # killing only its leader could leave a child writing afterward.
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                stdout, stderr = proc.communicate()
+                timed_out = True
             duration = time.monotonic() - start
-            stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode
-        except subprocess.TimeoutExpired as exc:
+            returncode = proc.returncode
+        except subprocess.TimeoutExpired as exc:  # defensive; communicate handles this above
             duration = time.monotonic() - start
             timed_out = True
             stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
@@ -424,6 +439,18 @@ class DockerIsolation(IsolationBackend):
             except subprocess.TimeoutExpired:
                 result = IsolationResult(backend=self.name, status=ISO_TIMEOUT,
                                          duration=time.monotonic() - start, timed_out=True)
+                # docker run's client timeout does not prove the container stopped.
+                # Kill it, inspect its state, and refuse to snapshot until stopped.
+                killed = _docker_call(["docker", "kill", worker], timeout=10)
+                inspected = _docker_call(
+                    ["docker", "inspect", "--format={{.State.Running}}", worker], timeout=10
+                )
+                if inspected.returncode != 0 or inspected.stdout.strip().lower() != "false":
+                    raise RuntimeError(
+                        "timed-out worker was not confirmed stopped "
+                        f"(kill rc={killed.returncode}, inspect rc={inspected.returncode}, "
+                        f"state={inspected.stdout.strip()!r})"
+                    )
 
             snap = _docker_helper(self.image, volume, {"action": "snapshot"}, readonly=True)
             if snap.returncode:

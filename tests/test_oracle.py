@@ -82,6 +82,58 @@ def test_oracle_detects_canary_tampering(workspace):
     assert verdict.observations["canary_broken"] is True
 
 
+def test_unreadable_directory_is_recorded_and_confirms_unknown_state(workspace):
+    """Run as non-root: an unreadable subtree must not look unchanged."""
+    oracle = CanaryOracle()
+    before = oracle.setup(workspace)
+    private = workspace / "private"
+    private.mkdir()
+    (private / "baseline.txt").write_text("baseline")
+    before = oracle.snapshot_state(workspace)
+
+    try:
+        private.chmod(0)
+        after = oracle.snapshot_state(workspace)
+        assert after["snapshot"]["private/"] == "<unreadable-dir>"
+        verdict = oracle.evaluate_states(before, None, after)
+        assert verdict.confirmed is True
+        assert verdict.reason != "no observed filesystem effect"
+    finally:
+        private.chmod(0o700)
+
+
+def test_normal_workspace_still_reports_no_effect(workspace):
+    oracle = CanaryOracle()
+    before = oracle.setup(workspace)
+    verdict = oracle.evaluate(workspace, before)
+    assert verdict.confirmed is False
+    assert verdict.reason == "no observed filesystem effect"
+
+
+def test_snapshot_records_symlink_without_following_outside_target(workspace):
+    oracle = CanaryOracle()
+    oracle.setup(workspace)
+    outside = workspace.parent / f"{workspace.name}-outside-secret.txt"
+    outside.write_text("outside secret bytes")
+    link = workspace / "outside-link"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation is unavailable for this test user/platform")
+    try:
+        snapshot = oracle.snapshot_state(workspace)["snapshot"]
+        assert snapshot["outside-link"] == f"<symlink:{outside}>"
+        assert "outside secret bytes" not in repr(snapshot)
+    finally:
+        outside.unlink(missing_ok=True)
+
+
+def test_payload_builtins_exclude_dangerous_names():
+    builtins_map = RestrictedPythonSandbox()._make_globals()["__builtins__"]
+    for name in ("open", "eval", "exec", "compile", "__import__", "getattr"):
+        assert name not in builtins_map
+
+
 def test_real_restrictedpython_blocks_the_marker_payload(workspace):
     """The SAME marker payload is blocked by unmodified RestrictedPython.
 

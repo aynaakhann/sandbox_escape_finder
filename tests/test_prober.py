@@ -19,6 +19,7 @@ from sandbox_escape_finder import (
     Config,
     Corpus,
     DynamicProber,
+    PayloadCase,
     RestrictedPythonSandbox,
     load_corpus,
 )
@@ -259,6 +260,76 @@ def test_timeout_is_reported_and_not_confirmed():
     assert r.timed_out is True
     assert r.escape_confirmed is False
     assert r.comparison == P.CMP_INCONCLUSIVE
+
+
+def test_timeout_kills_background_child_before_workspace_snapshot(tmp_path):
+    """A toy-sandbox child must not write after timeout cleanup/observation."""
+    import time
+
+    from sandbox_escape_finder import ToyBrokenSandbox
+
+    late_file = tmp_path / "late-child-write.txt"
+    source = (
+        "import os, time\\n"
+        "pid = os.fork()\\n"
+        "if pid == 0:\\n"
+        "    time.sleep(1.0)\\n"
+        f"    open({str(late_file)!r}, 'w').write('late')\\n"
+        "    os._exit(0)\\n"
+        "while True: pass\\n"
+    ).replace("\\n", "\n")
+    cfg = Config.from_dict({
+        "timeout_seconds": 0.25,
+        "resource_limits": {"cpu_seconds": 10, "processes": 64},
+        "isolation": {"mode": "subprocess"},
+    })
+    report = DynamicProber(ToyBrokenSandbox(), CanaryOracle(), cfg).run_report(
+        Corpus([PayloadCase(
+            id="background_writer", category="custom", technique="child process",
+            description="controlled timeout child", source=source,
+            reference="test", provenance="test", expected_static=None,
+        )])
+    )
+    row = report.payloads[0]
+    time.sleep(1.1)
+    assert row.execution_status == P.TIMEOUT
+    assert row.escape_confirmed is False
+    assert not late_file.exists()
+
+
+def test_forged_worker_compile_claim_does_not_hide_marker_escape():
+    class ForgedToy:
+        runner_spec = "tests.callable_fixtures:build_forged_marker_sandbox"
+
+        def kwargs(self):
+            return {}
+
+    source = "with open(MARKER_PATH, 'w') as f:\\n    f.write('marker')\\n".replace("\\n", "\n")
+    case = PayloadCase(
+        id="forged_worker", category="custom", technique="forged result",
+        description="toy worker lies about compile status", source=source,
+        reference="test", provenance="test", expected_static=None,
+    )
+    row = DynamicProber(ForgedToy(), CanaryOracle(), Config.default()).run([case])[0]
+    assert row["compiled"] is False
+    assert row["execution_status"] == P.COMPILE_REJECTED
+    assert row["escape_confirmed"] is True
+
+
+@pytest.mark.parametrize(
+    ("stdout", "returncode", "expected_status"),
+    [("not-json", 0, ISO_INFRA), ("", 1, ISO_RESOURCE)],
+)
+def test_malformed_or_empty_worker_output_is_not_no_escape(stdout, returncode, expected_status):
+    from sandbox_escape_finder.isolation import SubprocessIsolation
+
+    result = SubprocessIsolation(Config.default())._parse(stdout, "", returncode, 0.01)
+    status, oracle_result, escaped = DynamicProber._classify(result)
+    assert result.status == expected_status
+    assert status in (P.INCONCLUSIVE, P.RESOURCE_EXCEEDED)
+    assert oracle_result == P.ORACLE_NOT_EVALUATED
+    assert escaped is False
+    assert DynamicProber._compare(False, status, escaped) == P.CMP_INCONCLUSIVE
 
 
 # --------------------------------------------------------------------------- #

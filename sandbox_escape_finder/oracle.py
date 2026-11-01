@@ -71,6 +71,11 @@ def _snapshot(workspace: Path) -> dict:
         try:
             entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
         except OSError:
+            relative = directory.relative_to(workspace).as_posix() or "."
+            # An unreadable directory is unknown, not unchanged. Preserve an
+            # explicit snapshot entry so a new observation failure cannot look
+            # like an empty directory or silently erase its prior contents.
+            snap[f"{relative}/"] = "<unreadable-dir>"
             return
         for entry in entries:
             path = Path(entry.path)
@@ -86,6 +91,7 @@ def _snapshot(workspace: Path) -> dict:
                 else:
                     snap[relative] = f"<special:{stat.S_IFMT(info.st_mode)}>"
             except OSError:
+                # Unknown entry state must differ from a readable before-state.
                 snap[relative] = "<unreadable>"
 
     visit(workspace)

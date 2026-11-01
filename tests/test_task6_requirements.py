@@ -5,6 +5,8 @@ Checks exercise both the required API and the optional rich reporting API.
 Dynamic checks must run inside the disposable Linux test container.
 """
 
+import pytest
+
 from sandbox_escape_finder import (
     CanaryOracle,
     Config,
@@ -154,6 +156,94 @@ def test_docker_backend_applies_container_hardening(monkeypatch):
     assert command[command.index("--security-opt") + 1] == "no-new-privileges"
     assert command[command.index("--network") + 1] == "none"
     assert "--read-only" in command
+
+
+@pytest.mark.docker
+def test_docker_timeout_kills_and_confirms_worker_before_observer(monkeypatch):
+    import json
+    import subprocess
+
+    from sandbox_escape_finder import isolation
+    from sandbox_escape_finder.isolation import DockerIsolation, WorkerSpec
+
+    backend = DockerIsolation(Config.default())
+    monkeypatch.setattr(backend, "available", lambda: (True, "test Docker backend"))
+    calls = []
+
+    def fake_docker_call(command, payload=None, timeout=15):
+        calls.append(list(command))
+        if "sandbox_escape_finder._worker" in command:
+            raise subprocess.TimeoutExpired(command, timeout)
+        if command[1:2] == ["inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout="false\n", stderr="")
+        if command[1:2] == ["kill"]:
+            return subprocess.CompletedProcess(command, 0, stdout="worker\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    def fake_helper(image, volume, request, readonly=False, user="65534:65534"):
+        calls.append(["helper", request["action"], "readonly" if readonly else "rw"])
+        if request["action"] == "snapshot":
+            return subprocess.CompletedProcess(
+                ["observer"], 0, stdout=json.dumps({"ok": True, "snapshot": {}}), stderr=""
+            )
+        return subprocess.CompletedProcess(["setup"], 0, stdout='{"ok":true}', stderr="")
+
+    monkeypatch.setattr(isolation, "_docker_call", fake_docker_call)
+    monkeypatch.setattr(isolation, "_docker_helper", fake_helper)
+    result = backend.run(WorkerSpec(payload_source="while True: pass", sandbox_runner="unused:factory"))
+
+    labels = [
+        "worker" if "sandbox_escape_finder._worker" in c
+        else "kill" if c[1:2] == ["kill"]
+        else "inspect" if c[1:2] == ["inspect"]
+        else "observer" if c and c[0] == "helper" and c[1] == "snapshot"
+        else "other"
+        for c in calls
+    ]
+    assert result.status == isolation.ISO_TIMEOUT
+    assert result.verdict is not None
+    assert labels.index("worker") < labels.index("kill") < labels.index("inspect") < labels.index("observer")
+
+
+def test_docker_timeout_unconfirmed_worker_is_infra_failure_without_snapshot(monkeypatch):
+    import json
+    import subprocess
+
+    from sandbox_escape_finder import isolation
+    from sandbox_escape_finder.isolation import DockerIsolation, WorkerSpec
+
+    backend = DockerIsolation(Config.default())
+    monkeypatch.setattr(backend, "available", lambda: (True, "test Docker backend"))
+    calls = []
+    helper_actions = []
+
+    def fake_docker_call(command, payload=None, timeout=15):
+        calls.append(list(command))
+        if "sandbox_escape_finder._worker" in command:
+            raise subprocess.TimeoutExpired(command, timeout)
+        if command[1:2] == ["inspect"]:
+            return subprocess.CompletedProcess(command, 0, stdout="true\n", stderr="")
+        return subprocess.CompletedProcess(command, 0, stdout="worker\n", stderr="")
+
+    def fake_helper(image, volume, request, readonly=False, user="65534:65534"):
+        helper_actions.append(request["action"])
+        output = {"ok": True}
+        if request["action"] == "snapshot":
+            output["snapshot"] = {}
+        return subprocess.CompletedProcess(
+            ["helper"], 0, stdout=json.dumps(output), stderr=""
+        )
+
+    monkeypatch.setattr(isolation, "_docker_call", fake_docker_call)
+    monkeypatch.setattr(isolation, "_docker_helper", fake_helper)
+    result = backend.run(WorkerSpec(payload_source="while True: pass", sandbox_runner="unused:factory"))
+
+    assert result.status == isolation.ISO_INFRA
+    assert result.verdict is None
+    assert "restore" in helper_actions
+    assert "snapshot" not in helper_actions
+    assert any(command[1:2] == ["kill"] for command in calls)
+    assert any(command[1:2] == ["inspect"] for command in calls)
 
 
 def test_false_negative_reporting_with_a_contained_positive_control():
