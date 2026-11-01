@@ -315,20 +315,23 @@ class DynamicProber:
     @staticmethod
     def _classify(iso: IsolationResult) -> tuple[str, str, bool]:
         """Map raw isolation facts to (execution_status, oracle_result, escape)."""
+        verdict = iso.verdict or {}
+        confirmed = bool(verdict.get("confirmed"))
+
+        # The trusted controller can still observe a workspace effect after a
+        # timeout or worker crash. Keep that evidence instead of discarding it.
         if iso.status == ISO_UNAVAILABLE:
             return BLOCKED, ORACLE_NOT_EVALUATED, False
         if iso.status == ISO_TIMEOUT:
-            return TIMEOUT, ORACLE_NOT_EVALUATED, False
+            return TIMEOUT, ORACLE_CONFIRMED if confirmed else (ORACLE_NOT_CONFIRMED if verdict else ORACLE_NOT_EVALUATED), confirmed
         if iso.status == ISO_RESOURCE:
-            return RESOURCE_EXCEEDED, ORACLE_NOT_EVALUATED, False
+            return RESOURCE_EXCEEDED, ORACLE_CONFIRMED if confirmed else (ORACLE_NOT_CONFIRMED if verdict else ORACLE_NOT_EVALUATED), confirmed
         if iso.status == ISO_INFRA:
-            return INCONCLUSIVE, ORACLE_NOT_EVALUATED, False
+            return INCONCLUSIVE, ORACLE_CONFIRMED if confirmed else (ORACLE_NOT_CONFIRMED if verdict else ORACLE_NOT_EVALUATED), confirmed
         if iso.status != ISO_OK or iso.outcome is None:
-            return INCONCLUSIVE, ORACLE_NOT_EVALUATED, False
+            return INCONCLUSIVE, ORACLE_CONFIRMED if confirmed else (ORACLE_NOT_CONFIRMED if verdict else ORACLE_NOT_EVALUATED), confirmed
 
         outcome = iso.outcome
-        verdict = iso.verdict or {}
-        confirmed = bool(verdict.get("confirmed"))
 
         if not outcome.get("compiled"):
             exec_status = COMPILE_REJECTED
@@ -344,6 +347,8 @@ class DynamicProber:
 
     @staticmethod
     def _compare(static_flagged: bool, exec_status: str, escape: bool) -> str:
+        if escape:
+            return CMP_POS_ESCAPE if static_flagged else CMP_NEG_ESCAPE
         if exec_status in (TIMEOUT, RESOURCE_EXCEEDED, INCONCLUSIVE, BLOCKED):
             return CMP_INCONCLUSIVE
         if static_flagged and escape:

@@ -2,12 +2,12 @@
 
 This module is executed in a *fresh, isolated* Python process
 (``python -I -m sandbox_escape_finder._worker`` or by file path). It reads a
-JSON request from stdin, rebuilds the sandbox and oracle **from trusted dotted
-paths** (never from the payload), runs the payload as data, and writes a single
-JSON result object to stdout.
+JSON request from stdin, rebuilds only the sandbox **from a trusted dotted
+path**, runs the payload as data, and writes execution facts to stdout. Oracle
+code runs in the trusted controller, outside this process.
 
 The untrusted payload is only ever handled as a string passed to the sandbox
-runner; it is never imported or exec'd in the parent/test-runner process.
+runner; it is never imported or exec'd in the trusted controller process.
 """
 
 from __future__ import annotations
@@ -34,18 +34,18 @@ def _run(request: dict) -> dict:
     workspace = Path(request["workspace"])
 
     sandbox_factory = _resolve(request["sandbox_runner"])
-    oracle_factory = _resolve(request["oracle_runner"])
     sandbox = sandbox_factory(**request.get("sandbox_kwargs", {}))
-    oracle = oracle_factory(**request.get("oracle_kwargs", {}))
-
-    before = oracle.setup(workspace)
     outcome = sandbox(request["payload_source"], {"workspace": str(workspace)})
-    verdict = oracle.evaluate(workspace, before, getattr(sandbox, "last_result", outcome))
+    result = getattr(sandbox, "last_result", outcome)
+    if hasattr(result, "to_dict"):
+        result = result.to_dict()
+    # The parent must be able to serialize this untrusted execution result.
+    json.dumps(result)
 
     return {
         "ok": True,
         "outcome": outcome.to_dict(),
-        "verdict": verdict.to_dict(),
+        "oracle_exec_result": result,
     }
 
 

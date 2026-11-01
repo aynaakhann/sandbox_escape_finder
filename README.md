@@ -29,10 +29,46 @@ this project is a command-line tool and has no web server or port to open.
 Starting the image in Docker Desktop also runs the probe, but the terminal
 command applies the additional containment settings shown above.
 
-The default configuration uses subprocess workers **inside this Linux
-container**. You do not need Docker inside Docker. Each worker gets a temporary
-workspace and resource limits; the outer container supplies network and
-filesystem isolation. RestrictedPython itself is not a complete OS sandbox.
+### What has been verified
+
+On the maintainer's tested setup (Docker Desktop 29.8.2 using Linux containers,
+CPython 3.13, and RestrictedPython 8.5), both Docker images built successfully.
+The core suite completed with 101 passed and 8 deselected; the host-orchestrated
+Docker suite completed with 8 passed and 101 deselected. The application image
+and quickstart also ran successfully. This records results for that setup; it is
+not a guarantee that the project will run unchanged on every Docker installation.
+Other systems need a working Docker Engine that supports Linux containers,
+sufficient resources, and network access when building the image. Runtime
+availability can still depend on the host and Docker configuration.
+
+The default configuration uses the subprocess backend. It is portable, but
+process resource limits alone do not isolate the host filesystem or network.
+For host-side experiments, opt in to the Docker backend; each payload then runs
+in its own constrained container. The worker gets no host-folder or Docker-socket
+mount, networking is disabled, and its root filesystem is read-only. Docker
+shares the host's kernel and daemon, so this is an additional containment layer,
+not a guarantee against kernel or Docker vulnerabilities. Running the application
+image itself uses subprocess workers inside that outer container, so
+Docker-in-Docker is not needed. RestrictedPython itself is not a complete OS
+sandbox.
+
+To opt in to per-payload Docker from the host, build the image above and select
+`config/docker.json`. The trusted controller judges workspace snapshots from a
+size-limited, tmpfs-backed Docker volume; a separate observer container reads it
+after the worker exits. Docker must be running; if it is unavailable, the run
+is blocked rather than silently downgraded to subprocess mode.
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -c requirements-test-lock.txt -e ".[test]"
+.\.venv\Scripts\python.exe -m sandbox_escape_finder.cli --config config/docker.json probe
+.\.venv\Scripts\python.exe -m pytest -q -m docker -p no:cacheprovider
+```
+
+The final command runs the Docker integration tests from the host, where the
+Docker CLI can reach Docker Desktop. The tests check the full corpus and a
+contained positive control. The container does not mount host folders or the
+Docker socket.
 
 Run the example, which demonstrates both public APIs and the comparison:
 
@@ -60,10 +96,10 @@ execution status, oracle verdict, provenance, and timing.
 flowchart TD
     C[Validated configuration and attributed corpus] --> P[DynamicProber]
     P --> A[AST analysis: seven detectors]
-    P --> W[Isolated worker and disposable workspace]
-    W --> B[Oracle: capture before state]
-    B --> R[RestrictedPython: compile and execute]
-    R --> O[Oracle: compare after state]
+    P --> B[Trusted controller: Oracle before snapshot]
+    B --> W[Isolated worker: sandbox only]
+    W --> R[RestrictedPython: compile and execute]
+    R --> O[Trusted controller: after snapshot and verdict]
     A --> J[Join findings and execution facts]
     O --> J
     J --> F[Per-payload report and static/dynamic comparison]
@@ -126,12 +162,14 @@ strings or attributed corpus cases and returns `list[dict]` results. Each
 result records static flags, execution status, oracle confirmation, and timing.
 `analyze()` and `run_report()` provide richer objects for reporting helpers.
 
-The Docker backend in this example runs on the host and starts a fresh
-container for each case. The default CLI instead uses subprocesses inside the
-outer container. Both paths are tested.
+The Docker backend starts a fresh container for each case. The application
+image explicitly uses subprocess workers inside its outer container, so it does
+not need Docker-in-Docker. Both paths are tested.
 
-Custom sandbox/oracle hooks must be trusted importable module-level functions
+Custom sandbox hooks must be trusted importable module-level functions
 available in the worker environment, including the image for Docker mode.
+Custom oracle hooks run in the trusted controller process and must be available
+there.
 Closures, lambdas, and `__main__` functions are rejected in isolated modes.
 The controlled in-process test mode needs an explicit opt-in.
 
@@ -159,8 +197,10 @@ that every case is a complete working exploit.
 
 ## Oracle design
 
-Before execution, `CanaryOracle` creates `CANARY.txt` in a throwaway workspace
-and records file hashes. After execution, it confirms an effect if an
+Before execution, the trusted controller creates `CANARY.txt` in a throwaway
+workspace and records file hashes. The payload worker receives no Oracle
+factory or Oracle code. After execution, the controller captures the workspace
+state and confirms an effect if an
 `ESCAPE_MARKER` appears, the canary changes/disappears, or another file is
 created/removed. No real host file is used as an escape target.
 
@@ -169,15 +209,26 @@ violate its intended policy. Tests use a deliberately broken toy runner to
 establish that the oracle can detect a marker effect. This positive control
 also checks that a later exception does not erase an already observed effect.
 
-The oracle observes this workspace only. It does not detect pure information
-disclosure or effects elsewhere, and it does not compare the contents of every
-pre-existing file. A runner that permits legitimate file writes would need an
-allowed-area policy. "No confirmed escape" means no observed effect under
-this setup; it is not a proof that arbitrary Python code is safe.
+In subprocess mode, the controller snapshots the temporary workspace directly.
+That subprocess workspace does not constrain the payload to that directory; a
+successful OS-level escape could access other paths allowed to the host user.
+In Docker mode, trusted setup/observer helpers seed and snapshot a temporary
+tmpfs-backed volume while a small holder keeps it available. The payload worker
+is non-root and gets no host directory or Docker socket mount. Trusted setup
+helpers prepare the temporary volume; the short-lived holder uses container
+root only for workspace permissions, with networking disabled, a read-only root
+filesystem, and all Linux capabilities dropped. The controller removes the
+volume after judging. Docker still shares the host kernel and daemon. The oracle
+observes the designated workspace only: it does not monitor
+the host filesystem or network, detect pure information disclosure, or compare
+the contents of every pre-existing file. A runner that permits legitimate file
+writes would need an allowed-area policy. "No confirmed escape" means no
+observed effect under this setup; it is not proof that arbitrary Python code is
+safe.
 
 ## Results
 
-Verified on **2026-10-18** with RestrictedPython **8.5** in Linux containers.
+Verified on **2026-11-01** with RestrictedPython **8.5** in Linux containers.
 The saved [JSON report](reports/probe.json) contains the underlying observations.
 
 | Measure | Result |
@@ -234,7 +285,7 @@ docker build --target test -t sandbox-escape-finder:test .
 docker run --rm --network none --read-only --tmpfs /tmp:rw,size=64m,mode=1777 --cap-drop ALL --security-opt no-new-privileges --memory 512m --cpus 1 --pids-limit 64 sandbox-escape-finder:test
 ```
 
-Expected: **100 passed, 8 deselected**. This includes detector tests, oracle
+Expected: **101 passed, 8 deselected**. This includes detector tests, oracle
 positive/negative controls, API/configuration checks, the real full-corpus run,
 and ten task acceptance checks in `tests/test_task6_requirements.py`.
 To run just those ten, append
@@ -251,8 +302,8 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pytest -q -m docker -p no:cacheprovider
 ```
 
-Expected: **8 passed, 100 deselected**; together the two selections cover
-**108 distinct tests**. Skips do not count as exercised tests.
+Expected: **8 passed, 101 deselected**; together the two selections cover
+**109 distinct pytest items**. Skips do not count as exercised tests.
 The eight tests are deselected in the first run and selected in the second;
 they are not eight missing tests. On Windows, use the displayed `-m docker`
 selection; the other dynamic tests need Linux resource limits.
@@ -272,13 +323,23 @@ Docker-backend filename, then inspect `$LASTEXITCODE` (expected: `0`).
 | Attributed corpus, custom inputs, reproducible seed, and comparison | `tests/test_prober.py` and `tests/test_task6_requirements.py`; manually review each source adaptation below. |
 | Installable package and executable example | Docker builds exercise normal/editable installation; the quickstart demonstrates the API. |
 
-The tests check overlapping properties, not 108 different requirements.
-Explaining the code and its limitations remains part of the human review.
+The tests check overlapping properties, not 109 different requirements or
+109 payloads. The 19 corpus payloads are the actual snippets scanned and run
+against RestrictedPython. Pytest items are checks around those payloads and
+the rest of the tool. For example, `tests/test_detectors.py` uses small,
+project-authored positive and negative snippets to check each detector's
+matching behavior, locations, and false alarms. These fixtures are not copied
+from the external payload catalogs; some intentionally use the same technique
+shape as a corpus payload. The integration tests run the 19-case corpus through
+the selected backend. The task explicitly asks for detector unit tests, a toy
+broken-sandbox Oracle test, and a full-corpus integration test. Explaining the
+code and its limitations remains part of the human review.
 
 ## Configuration and limits
 
-Pass the JSON configuration before the CLI subcommand:
-`python -I -m sandbox_escape_finder.cli --config config/default.json probe`.
+Pass a configuration before the CLI subcommand when you want to override the
+default. `config/default.json` selects subprocess mode; `config/docker.json`
+opts in to Docker from the host.
 
 | Setting | Purpose |
 |---|---|
@@ -297,8 +358,9 @@ Pass the JSON configuration before the CLI subcommand:
 The AST detectors do not resolve arbitrary string construction, aliases, or
 runtime-generated attributes. Subprocess resource limits alone do not isolate
 networking or the host filesystem; use the documented outer Docker run.
-The standard test container needs no Docker socket, and custom hooks require
-trusted code to be present in the worker environment. The reported outcomes
+The standard test container needs no Docker socket. Custom sandbox hooks must
+be present in the worker environment; custom Oracle hooks run in the trusted
+controller. The reported outcomes
 apply to this pinned dependency version and supplied execution policy.
 
 ## Corpus sources

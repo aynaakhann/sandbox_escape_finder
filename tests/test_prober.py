@@ -61,6 +61,8 @@ def test_config_defaults_are_valid():
     cfg.validate()
     assert cfg.isolation.mode == "subprocess"
     assert cfg.isolation.require_isolation is True
+    assert Config.from_file("config/default.json").isolation.mode == "subprocess"
+    assert Config.from_file("config/docker.json").isolation.mode == "docker"
 
 
 def test_config_rejects_unknown_detector():
@@ -249,7 +251,7 @@ def test_timeout_is_reported_and_not_confirmed():
     corpus.add_custom(
         {"id": "infinite_loop", "source": "while True:\n    pass\n", "category": "custom"}
     )
-    cfg = Config.from_dict({"timeout_seconds": 1.0})
+    cfg = Config.from_dict({"timeout_seconds": 1.0, "isolation": {"mode": "subprocess"}})
     prober = DynamicProber(RestrictedPythonSandbox(), CanaryOracle(), cfg)
     report = prober.run_report(corpus)
     r = report.payloads[0]
@@ -278,6 +280,7 @@ def test_subprocess_mode_requires_runner_spec():
     corpus = Corpus([])
     corpus.add_custom({"id": "x", "source": "x = 1\n", "category": "custom"})
     bare_sandbox = lambda src, env: None  # noqa: E731 - no runner_spec attribute
-    prober = DynamicProber(bare_sandbox, CanaryOracle(), Config.default())
+    config = Config.from_dict({"isolation": {"mode": "subprocess"}})
+    prober = DynamicProber(bare_sandbox, CanaryOracle(), config)
     with pytest.raises(TypeError):
         prober.run_report(corpus)

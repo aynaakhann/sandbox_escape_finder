@@ -117,6 +117,45 @@ def test_supplied_oracle_is_used_or_explicitly_rejected():
     assert report.payloads[0].escape_confirmed is False, "The supplied oracle was silently replaced"
 
 
+def test_docker_backend_applies_container_hardening(monkeypatch):
+    import json
+    import subprocess
+
+    from sandbox_escape_finder import isolation
+    from sandbox_escape_finder.isolation import DockerIsolation, WorkerSpec
+
+    backend = DockerIsolation(Config.default())
+    monkeypatch.setattr(backend, "available", lambda: (True, "test Docker backend"))
+    seen = {"commands": []}
+
+    def fake_run(command, **kwargs):
+        seen["commands"].append(command)
+        if "volume" in command and "create" in command:
+            output = "sbxef-volume"
+        elif "sandbox_escape_finder._volume_helper" in command:
+            request = json.loads(kwargs.get("input", "{}"))
+            output = json.dumps({"ok": True, "snapshot": {"CANARY.txt": "hash"}})
+        elif "sandbox_escape_finder._worker" in command:
+            output = json.dumps({"ok": True, "outcome": {}, "oracle_exec_result": None})
+        else:
+            output = "container-id"
+        return subprocess.CompletedProcess(
+            command, 0,
+            stdout=output,
+            stderr="",
+        )
+
+    monkeypatch.setattr(isolation.subprocess, "run", fake_run)
+    result = backend.run(WorkerSpec(payload_source="x = 1\n", sandbox_runner="unused:runner"))
+
+    assert result.status == "ok"
+    command = next(c for c in seen["commands"] if "sandbox_escape_finder._worker" in c)
+    assert command[command.index("--cap-drop") + 1] == "ALL"
+    assert command[command.index("--security-opt") + 1] == "no-new-privileges"
+    assert command[command.index("--network") + 1] == "none"
+    assert "--read-only" in command
+
+
 def test_false_negative_reporting_with_a_contained_positive_control():
     corpus = Corpus([])
     corpus.add_custom({

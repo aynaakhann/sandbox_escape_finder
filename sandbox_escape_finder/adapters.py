@@ -75,10 +75,13 @@ class CallableOracle(CanaryOracle):
 
     def evaluate(self, workspace: Path, before: dict, exec_result=None) -> OracleVerdict:
         after = self.snapshot_state(workspace)
+        return self.evaluate_states(before, exec_result, after)
+
+    def evaluate_states(self, before, exec_result, after) -> OracleVerdict:
         observed = self.judge(before, after)
         return OracleVerdict(
             confirmed=self(before, exec_result, after),
             reason="caller-supplied oracle evaluated before/result/after",
             observations=observed.observations,
-            scope_note="Caller-supplied oracle using disposable workspace snapshots and the sandbox result.",
+            scope_note="Caller-supplied oracle using externally captured workspace snapshots and the sandbox result.",
         )

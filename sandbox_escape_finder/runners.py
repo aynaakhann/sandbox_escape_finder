@@ -204,7 +204,7 @@ def build_toy_broken_sandbox(**kwargs) -> ToyBrokenSandbox:
 
 
 # --------------------------------------------------------------------------- #
-# Oracle factory (lives here so the worker can import it by dotted path).
+# Oracle factory (lives here so the trusted controller can import it).
 # --------------------------------------------------------------------------- #
 def build_canary_oracle(**kwargs):
     from .oracle import CanaryOracle

@@ -1,0 +1,9 @@
+{
+  "_comment": "Opt in to one hardened Docker container per payload when running the CLI from the host.",
+  "isolation": {
+    "mode": "docker",
+    "require_isolation": true,
+    "allow_in_process": false,
+    "allow_network": false
+  }
+}

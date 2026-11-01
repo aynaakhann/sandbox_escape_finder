@@ -12,9 +12,10 @@ Two backends are provided:
   prevents a payload from touching the test-runner process state.
 
 * :class:`DockerIsolation` — runs the same worker inside a disposable container
-  with ``--network none``, a read-only root filesystem, a writable tmpfs
-  workspace, a non-root user, and memory/CPU/pid limits. This is the
-  recommended mode for untrusted or novel payloads. It requires a running
+  with ``--network none``, a read-only root filesystem, all Linux capabilities
+  dropped, no-new-privileges, a writable tmpfs workspace, a non-root user, and
+  memory/CPU/pid limits. This is the recommended mode for untrusted or novel
+  payloads. It requires a running
   Docker daemon and a pre-built image (see ``Dockerfile``). When unavailable it
   reports *unavailable* with a reason; the prober then marks affected cases
   BLOCKED rather than silently downgrading.
@@ -27,14 +28,18 @@ to fall back to a weaker mechanism.
 from __future__ import annotations
 
 import json
+import base64
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from .adapters import resolve_callable
+from .oracle import CanaryOracle
 from typing import Optional
 
 from .config import Config
@@ -71,7 +76,8 @@ class IsolationResult:
     returncode: Optional[int] = None
     infra_error: Optional[str] = None
     outcome: Optional[dict] = None  # ExecOutcome dict from the worker
-    verdict: Optional[dict] = None  # OracleVerdict dict from the worker
+    verdict: Optional[dict] = None  # computed by trusted controller, outside worker
+    oracle_exec_result: object = None
     raw_stderr: str = ""
 
     def to_dict(self) -> dict:
@@ -95,6 +101,60 @@ class IsolationBackend:
 
     def run(self, spec: WorkerSpec) -> IsolationResult:
         raise NotImplementedError
+
+
+def _make_oracle(spec: WorkerSpec):
+    """Construct the trusted oracle in the controller process."""
+    return resolve_callable(spec.oracle_runner)(**spec.oracle_kwargs)
+
+
+def _evaluate_workspace(oracle, workspace: Path, before: dict, exec_result):
+    """Capture post-state and judge it outside the payload worker."""
+    after = oracle.snapshot_state(workspace)
+    return oracle.evaluate_states(before, exec_result, after).to_dict()
+
+
+def _workspace_entries(root: Path) -> list[dict]:
+    """Serialize the trusted pre-run workspace without following symlinks."""
+    entries = []
+    for current, dirs, files in os.walk(root, followlinks=False):
+        base = Path(current)
+        for name in list(dirs):
+            path = base / name
+            rel = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                dirs.remove(name)
+                entries.append({"path": rel, "kind": "symlink", "target": os.readlink(path)})
+            else:
+                entries.append({"path": rel, "kind": "dir"})
+        for name in files:
+            path = base / name
+            rel = path.relative_to(root).as_posix()
+            if path.is_symlink():
+                entries.append({"path": rel, "kind": "symlink", "target": os.readlink(path)})
+            elif path.is_file():
+                entries.append({"path": rel, "kind": "file", "data": base64.b64encode(path.read_bytes()).decode("ascii")})
+            else:
+                raise OSError(f"unsupported oracle workspace entry: {rel}")
+    return entries
+
+
+def _docker_call(command, payload=None, timeout=15):
+    return subprocess.run(
+        command, input=payload, capture_output=True, text=True, timeout=timeout
+    )
+
+
+def _docker_helper(image: str, volume: str, request: dict, readonly: bool = False,
+                   user: str = "65534:65534"):
+    mount = f"type=volume,src={volume},dst=/work" + (",readonly" if readonly else "")
+    return _docker_call([
+        "docker", "run", "--rm", "-i", "--network", "none", "--read-only",
+        "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+        "--mount", mount, "--user", user, "-w", "/work",
+        "-e", "PYTHONDONTWRITEBYTECODE=1", "--entrypoint", "python", image,
+        "-I", "-m", "sandbox_escape_finder._volume_helper",
+    ], json.dumps(request), timeout=30)
 
 
 # --------------------------------------------------------------------------- #
@@ -149,12 +209,12 @@ class SubprocessIsolation(IsolationBackend):
             )
 
         workspace = Path(tempfile.mkdtemp(prefix="sbxef_ws_"))
+        oracle = _make_oracle(spec)
+        before = oracle.setup(workspace)
         request = {
             "payload_source": spec.payload_source,
             "sandbox_runner": spec.sandbox_runner,
             "sandbox_kwargs": spec.sandbox_kwargs,
-            "oracle_runner": spec.oracle_runner,
-            "oracle_kwargs": spec.oracle_kwargs,
             "workspace": str(workspace),
             "sys_path": [_project_root()],
         }
@@ -170,6 +230,7 @@ class SubprocessIsolation(IsolationBackend):
 
         start = time.monotonic()
         timed_out = False
+        stdout, stderr, returncode = "", "", None
         try:
             proc = subprocess.run(
                 [sys.executable, "-I", "-m", "sandbox_escape_finder._worker"],
@@ -189,19 +250,31 @@ class SubprocessIsolation(IsolationBackend):
             stdout = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
             stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
             returncode = None
-        finally:
-            shutil.rmtree(workspace, ignore_errors=True)
+        except OSError as exc:
+            duration = time.monotonic() - start
+            stderr = repr(exc)
 
-        if timed_out:
-            return IsolationResult(
+        try:
+            parsed = (IsolationResult(
                 backend=self.name,
-                status=ISO_TIMEOUT,
+                status=ISO_TIMEOUT if timed_out else ISO_INFRA,
                 duration=duration,
-                timed_out=True,
+                timed_out=timed_out,
+                infra_error=None if timed_out else f"worker launch failed: {stderr}",
+                raw_stderr=stderr[-2000:],
+            ) if timed_out or (returncode is None and stderr) else self._parse(stdout, stderr, returncode, duration))
+            parsed.verdict = _evaluate_workspace(
+                oracle, workspace, before, parsed.oracle_exec_result
+            )
+            return parsed
+        except Exception as exc:
+            return IsolationResult(
+                backend=self.name, status=ISO_INFRA, duration=duration,
+                infra_error=f"trusted oracle failed: {exc!r}",
                 raw_stderr=stderr[-2000:],
             )
-
-        return self._parse(stdout, stderr, returncode, duration)
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
 
     def _parse(self, stdout, stderr, returncode, duration) -> IsolationResult:
         try:
@@ -233,7 +306,7 @@ class SubprocessIsolation(IsolationBackend):
             duration=duration,
             returncode=returncode,
             outcome=data.get("outcome"),
-            verdict=data.get("verdict"),
+            oracle_exec_result=data.get("oracle_exec_result"),
             raw_stderr=(stderr or "")[-2000:],
         )
 
@@ -242,12 +315,12 @@ class SubprocessIsolation(IsolationBackend):
 # Docker backend.
 # --------------------------------------------------------------------------- #
 class DockerIsolation(IsolationBackend):
-    """Run the worker inside a disposable, network-less container.
+    """Run the worker and observer in separate disposable containers.
 
     Requires a running Docker daemon and a pre-built image (default
-    ``sandbox-escape-finder:latest``; see ``Dockerfile``). The whole workspace
-    lives on an in-container tmpfs, so the host filesystem is never touched by
-    the payload.
+    ``sandbox-escape-finder:latest``; see ``Dockerfile``). A bounded tmpfs-backed
+    volume holds the test workspace while the controller evaluates its state.
+    No host paths or Docker socket are mounted into the payload worker.
     """
 
     name = "docker"
@@ -287,52 +360,95 @@ class DockerIsolation(IsolationBackend):
             return IsolationResult(
                 backend=self.name, status=ISO_UNAVAILABLE, duration=0.0, infra_error=reason
             )
-
-        request = {
-            "payload_source": spec.payload_source,
-            "sandbox_runner": spec.sandbox_runner,
-            "sandbox_kwargs": spec.sandbox_kwargs,
-            "oracle_runner": spec.oracle_runner,
-            "oracle_kwargs": spec.oracle_kwargs,
-            "workspace": "/work",
-            "sys_path": [],  # package is installed in the image
-        }
+        oracle = _make_oracle(spec)
+        workspace = Path(tempfile.mkdtemp(prefix="sbxef_oracle_"))
+        nonce = uuid.uuid4().hex[:16]
+        volume, anchor, worker = f"sbxef-{nonce}", f"sbxef-a-{nonce}", f"sbxef-w-{nonce}"
         limits = self.config.resource_limits.to_dict()
-        cmd = [
-            "docker", "run", "--rm", "-i",
-            "--network", "none",
-            "--read-only",
-            # mode=1777 (sticky, world-writable like /tmp) so the non-root
-            # worker user can create the canary/marker in the tmpfs workspace.
-            "--tmpfs", f"/work:rw,size={limits['file_size_mb'] * 2}m,mode=1777",
-            "--memory", f"{limits['address_space_mb']}m",
-            "--cpus", "1",
-            "--pids-limit", str(limits["processes"]),
-            "--user", "65534:65534",  # nobody
-            "-w", "/work",
-            "-e", "PYTHONDONTWRITEBYTECODE=1",
-            "--entrypoint", "python",
-            self.image,
-            "-I", "-m", "sandbox_escape_finder._worker",
-        ]
+        size_mb = max(16, limits["file_size_mb"] * 2)
+        anchored = False
+        result = None
         start = time.monotonic()
         try:
-            proc = subprocess.run(
-                cmd,
-                input=json.dumps(request),
-                capture_output=True,
-                text=True,
-                timeout=self.config.timeout_seconds + 15,  # allow container startup
-            )
-            duration = time.monotonic() - start
-        except subprocess.TimeoutExpired:
-            duration = time.monotonic() - start
-            return IsolationResult(
-                backend=self.name, status=ISO_TIMEOUT, duration=duration, timed_out=True
-            )
+            before = oracle.setup(workspace)
+            proc = _docker_call([
+                "docker", "volume", "create", "--driver", "local", "--opt", "type=tmpfs",
+                "--opt", "device=tmpfs", "--opt", f"o=size={size_mb}m,mode=1777", volume,
+            ])
+            if proc.returncode:
+                raise RuntimeError(f"tmpfs volume creation failed: {proc.stderr.strip()}")
 
-        # Reuse the subprocess parser logic for the JSON contract.
-        return SubprocessIsolation._parse(self, proc.stdout, proc.stderr, proc.returncode, duration)  # type: ignore[arg-type]
+            proc = _docker_call([
+                "docker", "run", "-d", "--name", anchor, "--network", "none", "--read-only",
+                "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+                "--memory", f"{limits['address_space_mb']}m", "--cpus", "1",
+                "--pids-limit", "16", "--mount", f"type=volume,src={volume},dst=/work",
+                # The volume mount root is root-owned by Docker. This trusted
+                # holder only makes that tmpfs mount writable for uid 65534;
+                # it has no network, writable root, or Linux capabilities.
+                "--user", "0:0", "--entrypoint", "python", self.image,
+                "-I", "-c", "import os,time; os.chmod('/work',0o777); time.sleep(3600)",
+            ])
+            if proc.returncode:
+                raise RuntimeError(f"tmpfs holder startup failed: {proc.stderr.strip()}")
+            anchored = True
+
+            proc = _docker_helper(self.image, volume, {
+                "action": "restore", "entries": _workspace_entries(workspace),
+            }, user="0:0")
+            if proc.returncode:
+                raise RuntimeError(f"workspace setup failed: {proc.stderr.strip()}")
+
+            request = {
+                "payload_source": spec.payload_source,
+                "sandbox_runner": spec.sandbox_runner,
+                "sandbox_kwargs": spec.sandbox_kwargs,
+                "workspace": "/work",
+                "sys_path": [],
+            }
+            cmd = [
+                "docker", "run", "-i", "--name", worker, "--network", "none", "--read-only",
+                "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+                "--mount", f"type=volume,src={volume},dst=/work",
+                "--memory", f"{limits['address_space_mb']}m", "--cpus", "1",
+                "--pids-limit", str(limits["processes"]), "--user", "65534:65534",
+                "-w", "/work", "-e", "PYTHONDONTWRITEBYTECODE=1",
+                "--entrypoint", "python", self.image, "-I", "-m",
+                "sandbox_escape_finder._worker",
+            ]
+            try:
+                proc = _docker_call(cmd, json.dumps(request), self.config.timeout_seconds + 15)
+                result = SubprocessIsolation._parse(
+                    self, proc.stdout, proc.stderr, proc.returncode, time.monotonic() - start
+                )
+            except subprocess.TimeoutExpired:
+                result = IsolationResult(backend=self.name, status=ISO_TIMEOUT,
+                                         duration=time.monotonic() - start, timed_out=True)
+
+            snap = _docker_helper(self.image, volume, {"action": "snapshot"}, readonly=True)
+            if snap.returncode:
+                raise RuntimeError(f"workspace observation failed: {snap.stderr.strip()}")
+            after = json.loads(snap.stdout)
+            result.verdict = oracle.evaluate_states(
+                before, result.oracle_exec_result, {"snapshot": after["snapshot"]}
+            ).to_dict()
+            return result
+        except Exception as exc:
+            return IsolationResult(backend=self.name, status=ISO_INFRA,
+                                   duration=time.monotonic() - start,
+                                   infra_error=f"Docker Oracle/controller failure: {exc!r}")
+        finally:
+            if anchored:
+                for container in (worker, anchor):
+                    try:
+                        _docker_call(["docker", "rm", "-f", container], timeout=10)
+                    except Exception:
+                        pass
+            try:
+                _docker_call(["docker", "volume", "rm", "-f", volume], timeout=10)
+            except Exception:
+                pass
+            shutil.rmtree(workspace, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------- #

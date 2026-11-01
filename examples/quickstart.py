@@ -45,7 +45,7 @@ leaked = (lambda: 0).__globals__            # suspicious: function globals
 
 
 def main() -> int:
-    # Load the documented default config (safe: subprocess isolation required).
+    # Load the documented default config.
     config_path = Path(__file__).resolve().parent.parent / "config" / "default.json"
     config = Config.from_file(config_path) if config_path.is_file() else Config.default()
 

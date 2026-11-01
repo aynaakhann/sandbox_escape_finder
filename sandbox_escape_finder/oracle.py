@@ -24,6 +24,8 @@ and is never silently treated as safe.
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -60,23 +62,40 @@ def _sha256(data: bytes) -> str:
 
 
 def _snapshot(workspace: Path) -> dict:
-    """Map every file under ``workspace`` to a content hash."""
+    """Map workspace entries to hashes without following payload-created links."""
     snap: dict[str, str] = {}
     if not workspace.exists():
         return snap
-    for p in sorted(workspace.rglob("*")):
-        if p.is_file():
+
+    def visit(directory: Path) -> None:
+        try:
+            entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+        except OSError:
+            return
+        for entry in entries:
+            path = Path(entry.path)
+            relative = path.relative_to(workspace).as_posix()
             try:
-                snap[str(p.relative_to(workspace))] = _sha256(p.read_bytes())
+                info = entry.stat(follow_symlinks=False)
+                if stat.S_ISDIR(info.st_mode):
+                    visit(path)
+                elif stat.S_ISREG(info.st_mode):
+                    snap[relative] = _sha256(path.read_bytes())
+                elif stat.S_ISLNK(info.st_mode):
+                    snap[relative] = f"<symlink:{os.readlink(path)}>"
+                else:
+                    snap[relative] = f"<special:{stat.S_IFMT(info.st_mode)}>"
             except OSError:
-                snap[str(p.relative_to(workspace))] = "<unreadable>"
+                snap[relative] = "<unreadable>"
+
+    visit(workspace)
     return snap
 
 
 class CanaryOracle:
-    """Before/after canary oracle. Safe to reconstruct inside an isolated worker."""
+    """Before/after canary oracle evaluated by the trusted controller."""
 
-    #: Dotted path to a factory that rebuilds this oracle inside the worker.
+    #: Dotted path to a factory used by the trusted controller.
     runner_spec = "sandbox_escape_finder.runners:build_canary_oracle"
 
     def __init__(
@@ -90,7 +109,7 @@ class CanaryOracle:
         self.canary_content = canary_content
 
     def kwargs(self) -> dict:
-        """Serializable kwargs so the worker can rebuild an identical oracle."""
+        """Serializable kwargs so the trusted controller can rebuild the oracle."""
         return {
             "marker_name": self.marker_name,
             "canary_name": self.canary_name,
@@ -109,7 +128,7 @@ class CanaryOracle:
         return {"snapshot": _snapshot(Path(workspace))}
 
     # ------------------------------------------------------------------ #
-    # Before / after protocol used by the isolated worker.
+    # Before / after protocol used by the trusted isolation controller.
     # ------------------------------------------------------------------ #
     def setup(self, workspace: Path) -> dict:
         """Create the canary, clear the marker, and return the *before* state."""
@@ -124,6 +143,10 @@ class CanaryOracle:
     def evaluate(self, workspace: Path, before: dict, exec_result=None) -> OracleVerdict:
         """Snapshot the *after* state and compare it with ``before``."""
         after = self.snapshot_state(workspace)
+        return self.evaluate_states(before, exec_result, after)
+
+    def evaluate_states(self, before: dict, exec_result, after: dict) -> OracleVerdict:
+        """Judge supplied snapshots; suitable for a trusted external observer."""
         return self.judge(before, after)
 
     # ------------------------------------------------------------------ #
