@@ -94,21 +94,38 @@ execution status, oracle verdict, provenance, and timing.
 
 ```mermaid
 flowchart TD
-    C[Validated configuration and attributed corpus] --> A[StaticAnalyzer: AST analysis, seven detectors]
-    C --> P[DynamicProber: dynamic execution only]
-    P --> B[Trusted controller: Oracle before snapshot]
-    B --> W[Isolated worker: sandbox only]
-    W --> R[RestrictedPython: compile and execute]
-    R --> O[Trusted controller: after snapshot and verdict]
-    A --> J[Join by payload ID and compare]
-    O --> J
-    J --> F[Combined per-payload report]
+    C[Input: config and attributed corpus] --> N[AnalysisPipeline: validate cases and shuffle order using configured seed]
+    N --> A[Static branch: StaticAnalyzer parses AST and runs seven detectors]
+    N --> P[Dynamic branch: DynamicProber dispatches payloads]
+    P --> V{Is configured isolation backend available?}
+    V -->|yes| B[Backend prepares temporary workspace and Oracle before-state]
+    V -->|no| X[Record BLOCKED; do not fall back]
+    B --> W[Launch isolated worker: subprocess or per-payload container]
+    W --> S[Worker loads trusted sandbox runner; Oracle stays in controller]
+    S --> R[RestrictedPythonSandbox calls compile_restricted, then guarded exec]
+    R --> Q[Worker returns structured compile and execution facts]
+    Q --> O[Trusted controller captures after-state and evaluates Oracle]
+    O --> CL[Backend removes temporary workspace and container resources]
+    A --> J[AnalysisPipeline joins static and dynamic results by payload ID]
+    CL --> J
+    X --> J
+    J --> F[Compare findings and produce combined report]
 ```
 
-`AnalysisPipeline` sends the same normalized corpus through two separate
-corpus-wide passes: static analysis first, then dynamic probing. The dynamic
-branch does not call the static analyzer. After both passes finish, the
-pipeline joins their results by payload ID and creates the comparison report.
+`AnalysisPipeline` validates the input cases and uses the configured integer
+seed to shuffle their order reproducibly; it does not change payload source.
+The same cases then go through two separate full passes: static analysis first,
+then dynamic probing. The branches in the diagram show separate responsibilities,
+not simultaneous execution. The dynamic branch does not call the static
+analyzer. After both passes finish, the pipeline joins results by payload ID.
+
+The worker is the isolated operating-system process or container. It loads the
+trusted sandbox runner, which calls RestrictedPython to compile and execute the
+payload with restricted globals. “Oracle stays in controller” means Oracle
+code is not loaded into the payload worker; the controller captures the
+workspace state before and after execution and evaluates the effect. If the
+configured backend is missing, the payload is marked `BLOCKED` and is not run
+through a weaker backend.
 
 ### Where to change what
 
